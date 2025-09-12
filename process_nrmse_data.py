@@ -163,53 +163,31 @@ def main():
                 else:
                     rephrase_nrmse.append(nrmse_item['nrmse'])
     
-    # Create output data structure
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_data = {
-        'metadata': {
-            'timestamp': timestamp,
-            'total_samples': len(results),
-            'total_instructions': len(all_nrmse),
-            'original_instructions': len(original_nrmse),
-            'rephrased_instructions': len(rephrase_nrmse),
-            'source_files': {
-                'groundtruth': 'groundtruth_actions.json',
-                'gpu_output': 'gpu_output_actions.json', 
-                'augmented': 'augmented_instructions.json'
-            },
-            'nrmse_ranges': {
-                'min_values': min_values.tolist(),
-                'max_values': max_values.tolist(),
-                'ranges': ranges.tolist()
-            },
-            'summary_stats': {
-                'all_nrmse': {
-                    'mean': float(np.mean(all_nrmse)) if all_nrmse else None,
-                    'std': float(np.std(all_nrmse)) if all_nrmse else None,
-                    'min': float(np.min(all_nrmse)) if all_nrmse else None,
-                    'max': float(np.max(all_nrmse)) if all_nrmse else None,
-                    'count': len(all_nrmse)
-                },
-                'original_nrmse': {
-                    'mean': float(np.mean(original_nrmse)) if original_nrmse else None,
-                    'std': float(np.std(original_nrmse)) if original_nrmse else None,
-                    'min': float(np.min(original_nrmse)) if original_nrmse else None,
-                    'max': float(np.max(original_nrmse)) if original_nrmse else None,
-                    'count': len(original_nrmse)
-                },
-                'rephrase_nrmse': {
-                    'mean': float(np.mean(rephrase_nrmse)) if rephrase_nrmse else None,
-                    'std': float(np.std(rephrase_nrmse)) if rephrase_nrmse else None,
-                    'min': float(np.min(rephrase_nrmse)) if rephrase_nrmse else None,
-                    'max': float(np.max(rephrase_nrmse)) if rephrase_nrmse else None,
-                    'count': len(rephrase_nrmse)
-                }
-            }
-        },
-        'results': results
-    }
+    # Create simplified output data structure - only sample_id, original_instruction, and nrmse_list
+    simplified_results = []
+    
+    for result in results:
+        sample_id = result['sample_id']
+        original_instruction = result['original_instruction']
+        
+        # Extract just the NRMSE values in order (original + rephrases)
+        nrmse_list = []
+        for nrmse_item in result['nrmse_data']:
+            if nrmse_item['nrmse'] is not None:
+                nrmse_list.append(nrmse_item['nrmse'])
+        
+        simplified_entry = {
+            'sample_id': sample_id,
+            'original_instruction': original_instruction,
+            'nrmse_list': nrmse_list
+        }
+        
+        simplified_results.append(simplified_entry)
+    
+    output_data = simplified_results
     
     # Save to file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_filename = f"nrmse_analysis_{timestamp}.json"
     print(f"\nSaving results to {output_filename}...")
     
@@ -218,35 +196,48 @@ def main():
     
     print("Results saved successfully!")
     
+    # Recalculate summary statistics from simplified output
+    summary_all_nrmse = []
+    summary_original_nrmse = []
+    summary_rephrase_nrmse = []
+    
+    for result in output_data:
+        nrmse_list = result['nrmse_list']
+        if nrmse_list:
+            summary_all_nrmse.extend(nrmse_list)
+            summary_original_nrmse.append(nrmse_list[0])  # First is always original
+            if len(nrmse_list) > 1:
+                summary_rephrase_nrmse.extend(nrmse_list[1:])  # Rest are rephrases
+    
     # Print summary
     print("\n" + "="*60)
     print("SUMMARY STATISTICS")
     print("="*60)
-    print(f"Total samples: {len(results)}")
-    print(f"Total instructions processed: {len(all_nrmse)}")
-    print(f"Original instructions: {len(original_nrmse)}")
-    print(f"Rephrased instructions: {len(rephrase_nrmse)}")
+    print(f"Total samples: {len(output_data)}")
+    print(f"Total instructions processed: {len(summary_all_nrmse)}")
+    print(f"Original instructions: {len(summary_original_nrmse)}")
+    print(f"Rephrased instructions: {len(summary_rephrase_nrmse)}")
     
-    if all_nrmse:
+    if summary_all_nrmse:
         print(f"\nOverall NRMSE:")
-        print(f"  Mean: {np.mean(all_nrmse):.6f}")
-        print(f"  Std:  {np.std(all_nrmse):.6f}")
-        print(f"  Min:  {np.min(all_nrmse):.6f}")
-        print(f"  Max:  {np.max(all_nrmse):.6f}")
+        print(f"  Mean: {np.mean(summary_all_nrmse):.6f}")
+        print(f"  Std:  {np.std(summary_all_nrmse):.6f}")
+        print(f"  Min:  {np.min(summary_all_nrmse):.6f}")
+        print(f"  Max:  {np.max(summary_all_nrmse):.6f}")
     
-    if original_nrmse:
+    if summary_original_nrmse:
         print(f"\nOriginal Instruction NRMSE:")
-        print(f"  Mean: {np.mean(original_nrmse):.6f}")
-        print(f"  Std:  {np.std(original_nrmse):.6f}")
-        print(f"  Min:  {np.min(original_nrmse):.6f}")
-        print(f"  Max:  {np.max(original_nrmse):.6f}")
+        print(f"  Mean: {np.mean(summary_original_nrmse):.6f}")
+        print(f"  Std:  {np.std(summary_original_nrmse):.6f}")
+        print(f"  Min:  {np.min(summary_original_nrmse):.6f}")
+        print(f"  Max:  {np.max(summary_original_nrmse):.6f}")
     
-    if rephrase_nrmse:
+    if summary_rephrase_nrmse:
         print(f"\nRephrased Instruction NRMSE:")
-        print(f"  Mean: {np.mean(rephrase_nrmse):.6f}")
-        print(f"  Std:  {np.std(rephrase_nrmse):.6f}")
-        print(f"  Min:  {np.min(rephrase_nrmse):.6f}")
-        print(f"  Max:  {np.max(rephrase_nrmse):.6f}")
+        print(f"  Mean: {np.mean(summary_rephrase_nrmse):.6f}")
+        print(f"  Std:  {np.std(summary_rephrase_nrmse):.6f}")
+        print(f"  Min:  {np.min(summary_rephrase_nrmse):.6f}")
+        print(f"  Max:  {np.max(summary_rephrase_nrmse):.6f}")
     
     print(f"\nOutput saved to: {output_filename}")
 
