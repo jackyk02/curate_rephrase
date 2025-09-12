@@ -1,0 +1,28 @@
+[
+  {
+    "sample_id": 0,
+    "instruction": "put small spoon from basket to tray",
+    "current_groundtruth_action": [
+      -5.114564327612925e-11,
+      -1.2105481894675307e-10,
+      -9.31510285573367e-11,
+      2.525703735045681e-07,
+      -9.584495330727805e-08,
+      -5.684571391384452e-08,
+      1.0
+    ]
+  },
+  {
+    "sample_id": 1,
+    "instruction": "put small spoon from basket to tray",
+    "current_groundtruth_action": [
+      0.00815527979284525,
+      0.002605537883937359,
+      -0.00971079058945179,
+      -0.04788215458393097,
+      -0.02560991607606411,
+      0.13556690514087677,
+      1.0
+    ]
+  }
+]
