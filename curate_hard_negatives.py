@@ -313,7 +313,9 @@ def main():
             curated_results.append(result)
     
     # Save final results
-    output_filename = "curated_hard_negatives.json"
+    import os
+    gpu_output_basename = os.path.basename(args.gpu_output)
+    output_filename = f"hard_{gpu_output_basename}"
     
     with open(output_filename, 'w') as f:
         json.dump(curated_results, f, indent=2)
