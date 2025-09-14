@@ -157,14 +157,18 @@ def process_sample(sample_id: int, groundtruth_dict: Dict, gpu_output_data: Dict
         all_instructions = all_instructions[:num_to_process]
         output_ids_list = output_ids_list[:num_to_process]
     
-    # Compute NRMSE for each instruction
-    for i, (instruction, output_ids) in enumerate(zip(all_instructions, output_ids_list)):
-        try:
-            generated_action = converter.token_to_action(output_ids)
+    # Compute NRMSE for all instructions using batch inference
+    try:
+        # Convert all output_ids to actions in batch
+        generated_actions = converter.token_to_action(output_ids_list)
+        
+        # Compute NRMSE for each generated action
+        nrmse_values = []
+        for generated_action in generated_actions:
             nrmse = calculate_nrmse(ground_truth_action, generated_action)
             nrmse_values.append(float(nrmse))
-        except Exception as e:
-            return None
+    except Exception as e:
+        return None
     
     if len(nrmse_values) == 0:
         return None
