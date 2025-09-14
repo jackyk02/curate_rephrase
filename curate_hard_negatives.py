@@ -178,13 +178,25 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
         print(f"Warning: No embedding mapping found for sample_id {sample_id}")
         return None
     
-    sample_mapping = metadata['sample_mappings'][sample_id]
-    instruction_indices = sample_mapping['all_indices']
+    # Create instruction-to-embedding mapping for this sample
+    # Handle duplicates by mapping each instruction to its unique embedding
+    instruction_to_idx = {inst: idx for idx, inst in enumerate(metadata['all_instructions'])}
     
-    # Extract embeddings for this sample
-    sample_embeddings = embeddings[instruction_indices]
+    # Map each instruction in all_instructions to its embedding index
+    sample_embedding_indices = []
+    for instruction in all_instructions:
+        if instruction in instruction_to_idx:
+            sample_embedding_indices.append(instruction_to_idx[instruction])
+        else:
+            print(f"Warning: Instruction not found in precomputed embeddings: {instruction[:50]}...")
+            return None
+    
+    # Extract embeddings for this sample (handling duplicates correctly)
+    sample_embeddings = embeddings[sample_embedding_indices]
     e_lang = torch.tensor(sample_embeddings, dtype=torch.float32)
     errs = torch.tensor(nrmse_values, dtype=torch.float32)
+    
+    print(f"Successfully mapped {len(all_instructions)} instructions to {len(sample_embeddings)} embeddings")
     
     # Move to CUDA if available
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -237,7 +249,8 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
                 neg_err = errs[neg_idx_val].item()
                 
                 negative_instructions[neg_text] = {
-                    "similarity": float(neg_sim)
+                    "similarity": float(neg_sim),
+                    "error": float(neg_err)
                 }
                 
                 print(f"    Hard negative: sim={neg_sim:.3f}, err={neg_err:.4f}: '{neg_text[:50]}...'")
@@ -267,7 +280,7 @@ def main():
     with open('gpu_output_actions.json', 'r') as f:
         gpu_output_data = json.load(f)
     
-    with open('augmented_instructions.json', 'r') as f:
+    with open('augmented_instructions_2_samples.json', 'r') as f:
         augmented_data = json.load(f)
     
     print("Initializing token-to-action converter...")
