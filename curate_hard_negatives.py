@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, List, Dict, Tuple
 import argparse
+from tqdm import tqdm
 
 def load_precomputed_embeddings(embeddings_file: str, metadata_file: str) -> Tuple[np.ndarray, Dict]:
     """Load precomputed Qwen3 embeddings and metadata."""
@@ -27,6 +28,10 @@ def load_precomputed_embeddings(embeddings_file: str, metadata_file: str) -> Tup
     print(f"Loaded embeddings shape: {embeddings.shape}")
     print(f"Embedding dimension: {embeddings.shape[1]}")
     print(f"Total instructions: {len(metadata['all_instructions'])}")
+    
+    # Create instruction-to-index mapping once for efficiency
+    print("Creating instruction-to-index mapping...")
+    metadata['instruction_to_idx'] = {inst: idx for idx, inst in enumerate(metadata['all_instructions'])}
     
     return embeddings, metadata
 
@@ -112,8 +117,8 @@ def identify_synthetic_positives(errs: torch.Tensor, original_idx: int = 0, delt
     original_err = errs[original_idx]
     return errs < (original_err - delta)
 
-def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict, 
-                  augmented_data: Dict, converter: TokenActionConverter, 
+def process_sample(sample_id: int, groundtruth_dict: Dict, gpu_output_data: Dict, 
+                  augmented_dict: Dict, converter: TokenActionConverter, 
                   embeddings: np.ndarray, metadata: Dict, max_positives: int = 40) -> Optional[Dict]:
     """Process a single sample to compute NRMSE and mine hard negatives."""
     
@@ -125,24 +130,19 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
             break
     
     if sample_result is None:
-        print(f"Warning: No GPU output found for sample_id {sample_id}")
         return None
     
     original_instruction = sample_result['original_instruction']
     output_ids_list = sample_result['output_ids_list']
     
     # Get ground truth action for this sample
-    groundtruth_dict = {item['sample_id']: item for item in groundtruth_data}
     if sample_id not in groundtruth_dict:
-        print(f"Warning: No ground truth found for sample_id {sample_id}")
         return None
         
     ground_truth_action = np.array(groundtruth_dict[sample_id]['current_groundtruth_action'])
     
     # Get rephrases for this sample
-    augmented_dict = {item['sample_id']: item for item in augmented_data}
     if sample_id not in augmented_dict:
-        print(f"Warning: No augmented instructions found for sample_id {sample_id}")
         return None
         
     rephrases = augmented_dict[sample_id]['rephrases']
@@ -153,7 +153,6 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
     
     # Check if we have the right number of output_ids
     if len(output_ids_list) != len(all_instructions):
-        print(f"Warning: Mismatch for sample_id {sample_id}: {len(output_ids_list)} output_ids vs {len(all_instructions)} instructions")
         num_to_process = min(len(output_ids_list), len(all_instructions))
         all_instructions = all_instructions[:num_to_process]
         output_ids_list = output_ids_list[:num_to_process]
@@ -165,43 +164,24 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
             nrmse = calculate_nrmse(ground_truth_action, generated_action)
             nrmse_values.append(float(nrmse))
         except Exception as e:
-            print(f"Error processing instruction {i} for sample_id {sample_id}: {e}")
             return None
     
     if len(nrmse_values) == 0:
         return None
     
-    print(f"Loading precomputed embeddings for {len(all_instructions)} instructions in sample {sample_id}...")
-    
     # Get embeddings for this sample's instructions using precomputed embeddings
-    if sample_id not in metadata['sample_mappings']:
-        print(f"Warning: No embedding mapping found for sample_id {sample_id}")
-        return None
-    
-    # Create instruction-to-embedding mapping for this sample
-    # Handle duplicates by mapping each instruction to its unique embedding
-    instruction_to_idx = {inst: idx for idx, inst in enumerate(metadata['all_instructions'])}
-    
-    # Map each instruction in all_instructions to its embedding index
     sample_embedding_indices = []
     for instruction in all_instructions:
-        if instruction in instruction_to_idx:
-            sample_embedding_indices.append(instruction_to_idx[instruction])
+        if instruction in metadata['instruction_to_idx']:
+            sample_embedding_indices.append(metadata['instruction_to_idx'][instruction])
         else:
-            print(f"Warning: Instruction not found in precomputed embeddings: {instruction[:50]}...")
             return None
     
-    # Extract embeddings for this sample (handling duplicates correctly)
-    sample_embeddings = embeddings[sample_embedding_indices]
-    e_lang = torch.tensor(sample_embeddings, dtype=torch.float32)
-    errs = torch.tensor(nrmse_values, dtype=torch.float32)
-    
-    print(f"Successfully mapped {len(all_instructions)} instructions to {len(sample_embeddings)} embeddings")
-    
-    # Move to CUDA if available
+    # Extract embeddings for this sample and move to device efficiently
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    e_lang = e_lang.to(device)
-    errs = errs.to(device)
+    sample_embeddings = embeddings[sample_embedding_indices]
+    e_lang = torch.tensor(sample_embeddings, dtype=torch.float32, device=device)
+    errs = torch.tensor(nrmse_values, dtype=torch.float32, device=device)
     
     # Identify synthetic positives (including original instruction at index 0)
     synthetic_positives = identify_synthetic_positives(errs, original_idx=0, delta=0.02)
@@ -227,9 +207,12 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
             # Original not in positives, just take top max_positives
             positive_indices = sorted_indices[:max_positives]
         
-        print(f"Sample {sample_id}: Capped at {max_positives} positive instructions (from {len(torch.where(synthetic_positives)[0])} candidates)")
+        pass
     
-    print(f"Sample {sample_id}: Found {len(positive_indices)} positive instructions")
+    # Continue processing with selected positives
+    
+    # Pre-compute normalized embeddings once for efficiency
+    E_norm = F.normalize(e_lang, dim=-1)
     
     # Mine hard negatives for each positive
     positive_instructions = {}
@@ -238,8 +221,6 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
         pos_idx_val = pos_idx.item()
         positive_text = all_instructions[pos_idx_val]
         positive_error = errs[pos_idx_val].item()
-        
-        print(f"  Positive [{pos_idx_val}] (err={positive_error:.4f}): '{positive_text[:60]}...'")
         
         # Mine hard negatives for this positive
         hard_neg_indices = mine_hard_negatives_for_anchor(
@@ -255,9 +236,8 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
         
         negative_instructions = {}
         if len(hard_neg_indices) > 0:
-            # Calculate similarities for analysis
-            e_pos_norm = F.normalize(e_lang[pos_idx_val:pos_idx_val+1], dim=-1)
-            E_norm = F.normalize(e_lang, dim=-1)
+            # Use pre-computed normalized embeddings for similarity calculation
+            e_pos_norm = E_norm[pos_idx_val:pos_idx_val+1]
             similarities = (E_norm @ e_pos_norm.T).squeeze(-1)
             
             for neg_idx in hard_neg_indices:
@@ -271,7 +251,6 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
                     "error": float(neg_err)
                 }
                 
-                print(f"    Hard negative: sim={neg_sim:.3f}, err={neg_err:.4f}: '{neg_text[:50]}...'")
         
         positive_instructions[positive_text] = {
             "negative_instructions": negative_instructions
@@ -285,65 +264,56 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
 
 def main():
     parser = argparse.ArgumentParser(description="Curate hard negatives using precomputed embeddings")
-    parser.add_argument("--embeddings", required=True, help="Path to precomputed embeddings (.npy file)")
-    parser.add_argument("--metadata", required=True, help="Path to embeddings metadata (.pkl file)")
-    parser.add_argument("--max-positives", type=int, default=40, 
+    parser.add_argument("--gpu-output", required=True, help="Path to GPU output data JSON file")
+    parser.add_argument("--max-positives", type=int, default=30, 
                        help="Maximum number of positive instructions per sample (original + N-1 best rephrases)")
     args = parser.parse_args()
     
     print("Loading JSON files...")
     
     # Load all data files
-    with open('groundtruth_actions.json', 'r') as f:
+    with open('actions_instructions.json', 'r') as f:
         groundtruth_data = json.load(f)
     
-    with open('gpu_output_actions.json', 'r') as f:
+    with open(args.gpu_output, 'r') as f:
         gpu_output_data = json.load(f)
     
-    with open('augmented_instructions_2_samples.json', 'r') as f:
+    with open('augmented_instructions.json', 'r') as f:
         augmented_data = json.load(f)
     
     print("Initializing token-to-action converter...")
     converter = TokenActionConverter()
     
     print("Loading precomputed embeddings...")
-    embeddings, metadata = load_precomputed_embeddings(args.embeddings, args.metadata)
+    embeddings, metadata = load_precomputed_embeddings(
+        "qwen_embeddings_20250914_003853.npy", 
+        "qwen_embeddings_metadata_20250914_003853.pkl"
+    )
+    
+    # Pre-process data into dictionaries for faster lookup
+    print("Pre-processing data for faster lookup...")
+    groundtruth_dict = {item['sample_id']: item for item in groundtruth_data}
+    augmented_dict = {item['sample_id']: item for item in augmented_data}
     
     # Process each sample
     curated_results = []
     
     # Get list of sample IDs from GPU output data
     sample_ids = [result['sample_id'] for result in gpu_output_data['results']]
-    print(f"Processing {len(sample_ids)} samples...")
     
-    for i, sample_id in enumerate(sample_ids):
-        print(f"\n{'='*60}")
-        print(f"Processing sample {sample_id} ({i+1}/{len(sample_ids)})")
-        
-        result = process_sample(sample_id, groundtruth_data, gpu_output_data, 
-                              augmented_data, converter, embeddings, metadata, args.max_positives)
+    for sample_id in tqdm(sample_ids, desc="Curating hard negatives"):
+        result = process_sample(sample_id, groundtruth_dict, gpu_output_data, 
+                              augmented_dict, converter, embeddings, metadata, args.max_positives)
         
         if result is not None:
             curated_results.append(result)
-        
-        # Save progress periodically
-        if (i + 1) % 10 == 0:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            temp_filename = f"curated_hard_negatives_progress_{timestamp}.json"
-            with open(temp_filename, 'w') as f:
-                json.dump(curated_results, f, indent=2)
-            print(f"Progress saved to {temp_filename}")
     
     # Save final results
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_filename = f"curated_hard_negatives_{timestamp}.json"
+    output_filename = "curated_hard_negatives.json"
     
     with open(output_filename, 'w') as f:
         json.dump(curated_results, f, indent=2)
     
-    print(f"\n{'='*60}")
-    print(f"Processing complete!")
-    print(f"Total samples processed: {len(curated_results)}")
     print(f"Results saved to: {output_filename}")
     
     # Print summary statistics
@@ -354,11 +324,11 @@ def main():
         for result in curated_results
     )
     
-    print(f"Summary:")
-    print(f"  Total positive instructions: {total_positives}")
-    print(f"  Total hard negative instructions: {total_negatives}")
-    print(f"  Average positives per sample: {total_positives/len(curated_results):.1f}")
-    print(f"  Average negatives per positive: {total_negatives/max(total_positives, 1):.1f}")
+    print(f"Total samples: {len(curated_results)}")
+    print(f"Total positives: {total_positives}")
+    print(f"Total negatives: {total_negatives}")
+    print(f"Avg positives/sample: {total_positives/len(curated_results):.1f}")
+    print(f"Avg negatives/positive: {total_negatives/max(total_positives, 1):.1f}")
 
 if __name__ == "__main__":
     main()
