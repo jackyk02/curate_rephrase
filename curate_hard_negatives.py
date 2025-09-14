@@ -114,7 +114,7 @@ def identify_synthetic_positives(errs: torch.Tensor, original_idx: int = 0, delt
 
 def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict, 
                   augmented_data: Dict, converter: TokenActionConverter, 
-                  embeddings: np.ndarray, metadata: Dict) -> Optional[Dict]:
+                  embeddings: np.ndarray, metadata: Dict, max_positives: int = 40) -> Optional[Dict]:
     """Process a single sample to compute NRMSE and mine hard negatives."""
     
     # Find the sample in GPU output data
@@ -211,6 +211,24 @@ def process_sample(sample_id: int, groundtruth_data: Dict, gpu_output_data: Dict
     if 0 not in positive_indices:
         positive_indices = torch.cat([torch.tensor([0], device=positive_indices.device), positive_indices])
     
+    # Cap at max_positives, selecting original + (max_positives-1) with lowest NRMSE
+    if len(positive_indices) > max_positives:
+        # Sort positive indices by their NRMSE values (ascending)
+        sorted_indices = positive_indices[torch.argsort(errs[positive_indices])]
+        
+        # Always keep the original instruction (index 0) if it's in the list
+        if 0 in positive_indices:
+            # Remove original from sorted list temporarily
+            sorted_indices_no_orig = sorted_indices[sorted_indices != 0]
+            # Take top (max_positives-1) excluding original + original = max_positives total
+            top_indices = sorted_indices_no_orig[:max_positives-1]
+            positive_indices = torch.cat([torch.tensor([0], device=positive_indices.device), top_indices])
+        else:
+            # Original not in positives, just take top max_positives
+            positive_indices = sorted_indices[:max_positives]
+        
+        print(f"Sample {sample_id}: Capped at {max_positives} positive instructions (from {len(torch.where(synthetic_positives)[0])} candidates)")
+    
     print(f"Sample {sample_id}: Found {len(positive_indices)} positive instructions")
     
     # Mine hard negatives for each positive
@@ -269,6 +287,8 @@ def main():
     parser = argparse.ArgumentParser(description="Curate hard negatives using precomputed embeddings")
     parser.add_argument("--embeddings", required=True, help="Path to precomputed embeddings (.npy file)")
     parser.add_argument("--metadata", required=True, help="Path to embeddings metadata (.pkl file)")
+    parser.add_argument("--max-positives", type=int, default=40, 
+                       help="Maximum number of positive instructions per sample (original + N-1 best rephrases)")
     args = parser.parse_args()
     
     print("Loading JSON files...")
@@ -301,7 +321,7 @@ def main():
         print(f"Processing sample {sample_id} ({i+1}/{len(sample_ids)})")
         
         result = process_sample(sample_id, groundtruth_data, gpu_output_data, 
-                              augmented_data, converter, embeddings, metadata)
+                              augmented_data, converter, embeddings, metadata, args.max_positives)
         
         if result is not None:
             curated_results.append(result)
